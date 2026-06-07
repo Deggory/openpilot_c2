@@ -6,6 +6,7 @@ from selfdrive.manager.process import PythonProcess, NativeProcess, DaemonProces
 from common.params import Params
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
+K230 = os.getenv("OPENPILOT_TARGET_ARCH") == "riscv64"
 
 EnableLogger = Params().get_bool('OpkrEnableLogger')
 EnableUploader = Params().get_bool('OpkrEnableUploader')
@@ -18,7 +19,7 @@ EnableExternalNavi = Params().get("OPKRNaviSelect", encoding="utf8") == "4" or P
 procs = [
   DaemonProcess("manage_athenad", "selfdrive.athena.manage_athenad", "AthenadPid"),
   # due to qualcomm kernel bugs SIGKILLing camerad sometimes causes page table corruption
-  NativeProcess("camerad", "selfdrive/camerad", ["./camerad"], unkillable=True, driverview=True),
+  NativeProcess("camerad", "selfdrive/camerad", ["./camerad"], unkillable=not K230, driverview=True),
   NativeProcess("clocksd", "selfdrive/clocksd", ["./clocksd"]),
   NativeProcess("dmonitoringmodeld", "selfdrive/modeld", ["./dmonitoringmodeld"], enabled=(not PC or WEBCAM), driverview=True),
   NativeProcess("logcatd", "selfdrive/logcatd", ["./logcatd"]),

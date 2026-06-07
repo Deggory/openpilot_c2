@@ -8,7 +8,7 @@
 #include "visionipc/visionipc_server.h"
 #include "logger/logger.h"
 
-VisionIpcClient::VisionIpcClient(std::string name, VisionStreamType type, bool conflate, cl_device_id device_id, cl_context ctx) : name(name), type(type), device_id(device_id), ctx(ctx) {
+VisionIpcClient::VisionIpcClient(std::string name_, VisionStreamType type_, bool conflate, cl_device_id device_id_, cl_context ctx_) : name(name_), type(type_), device_id(device_id_), ctx(ctx_) {
   msg_ctx = Context::create();
   sock = SubSocket::create(msg_ctx, get_endpoint_name(name, type), "127.0.0.1", conflate, false);
 

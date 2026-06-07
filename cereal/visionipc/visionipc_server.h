@@ -31,7 +31,7 @@ class VisionIpcServer {
   void listener(void);
 
  public:
-  VisionIpcServer(std::string name, cl_device_id device_id=nullptr, cl_context ctx=nullptr);
+  VisionIpcServer(std::string name_, cl_device_id device_id_=nullptr, cl_context ctx_=nullptr);
   ~VisionIpcServer();
 
   VisionBuf * get_buffer(VisionStreamType type);

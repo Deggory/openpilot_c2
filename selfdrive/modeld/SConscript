@@ -43,7 +43,22 @@ if arch == "aarch64" or arch == "larch64":
 else:
   libs += ['pthread']
 
-  if not GetOption('snpe'):
+  if arch == "riscv64":
+    del libs[libs.index('SNPE')]
+    del libs[libs.index('symphony-cpu')]
+    del common_src[common_src.index('runners/snpemodel.cc')]
+    common_src += ['runners/k230model.cc', 'runners/k230_mmz.c']
+    lenv['CFLAGS'].append("-DUSE_K230_KMODEL")
+    lenv['CXXFLAGS'].append("-DUSE_K230_KMODEL")
+    lenv['CXXFLAGS'] += ["-isystem", "third_party/nncase_k230/include", "-Wno-error=multichar"]
+    libs += [
+      File('#third_party/nncase_k230/lib/libNncase.Runtime.Native.a'),
+      File('#third_party/nncase_k230/lib/libnncase.rt_modules.k230.a'),
+      File('#third_party/nncase_k230/lib/libfunctional_k230.a'),
+      'atomic',
+      'dl',
+    ]
+  elif not GetOption('snpe'):
     # for onnx support
     common_src += ['runners/onnxmodel.cc']
 
@@ -93,3 +108,16 @@ lenv.Program('_modeld', [
     "modeld.cc",
     "models/driving.cc",
   ]+common_model, LIBS=libs)
+
+if arch == "riscv64":
+  lenv.Program('_k230_kmodel_stress', [
+      "k230_kmodel_stress.cc",
+      "runners/k230_mmz.c",
+    ], LIBS=[
+      File('#third_party/nncase_k230/lib/libNncase.Runtime.Native.a'),
+      File('#third_party/nncase_k230/lib/libnncase.rt_modules.k230.a'),
+      File('#third_party/nncase_k230/lib/libfunctional_k230.a'),
+      'pthread',
+      'atomic',
+      'dl',
+    ])

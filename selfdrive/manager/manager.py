@@ -317,8 +317,13 @@ def manager_init() -> None:
     os.chmod(os.path.join(BASEDIR, "cereal", "libmessaging_shared.so"), 0o755)
 
 def manager_prepare() -> None:
+  blocked = [x for x in os.getenv("BLOCK", "").split(",") if len(x) > 0]
+  if os.getenv("NOBOARD") is not None:
+    blocked.append("pandad")
+
   for p in managed_processes.values():
-    p.prepare()
+    if p.name not in blocked:
+      p.prepare()
 
 
 def manager_cleanup() -> None:
@@ -406,7 +411,8 @@ def main() -> None:
   if prepare_only:
     return
   
-  managed_processes['ui'].start()
+  if os.getenv("K230_MANAGER_SKIP_UI") != "1":
+    managed_processes['ui'].start()
 
   # SystemExit on sigterm
   signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(1))

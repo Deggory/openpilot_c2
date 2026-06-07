@@ -2,12 +2,14 @@
 #include <cstdlib>
 #include <mutex>
 #include <cmath>
+#include <algorithm>
 
 #include <eigen3/Eigen/Dense>
 
 #include "cereal/messaging/messaging.h"
 #include "cereal/visionipc/visionipc_client.h"
 #include "selfdrive/common/clutil.h"
+#include "selfdrive/common/modeldata.h"
 #include "selfdrive/common/params.h"
 #include "selfdrive/common/swaglog.h"
 #include "selfdrive/common/util.h"
@@ -16,7 +18,113 @@
 
 ExitHandler do_exit;
 
-mat3 update_calibration(Eigen::Matrix<float, 3, 4> &extrinsics, bool wide_camera, bool bigmodel_frame) {
+#ifdef USE_K230_KMODEL
+namespace {
+
+constexpr int K230_DEFAULT_WIDTH = 512;
+constexpr int K230_DEFAULT_HEIGHT = 256;
+constexpr int K230_DEFAULT_SENSOR_WIDTH = 1920;
+constexpr int K230_DEFAULT_SENSOR_HEIGHT = 1080;
+constexpr float K230_DEFAULT_SOURCE_FX = 910.0f;
+constexpr float K230_DEFAULT_SOURCE_FY = 910.0f;
+constexpr float K230_DEFAULT_SOURCE_CX = 256.0f;
+constexpr float K230_DEFAULT_SOURCE_CY = 47.6f;
+
+float getenv_optional_float(const char *key, float fallback) {
+  return util::getenv(key).empty() ? fallback : util::getenv(key, fallback);
+}
+
+Eigen::Matrix<float, 3, 4> k230_zero_extrinsics() {
+  Eigen::Matrix<float, 3, 4> extrinsics;
+  extrinsics << 0.0f, -1.0f,  0.0f, 0.0f,
+                0.0f,  0.0f, -1.0f, 1.22f,
+                1.0f,  0.0f,  0.0f, 0.0f;
+  return extrinsics;
+}
+
+mat3 k230_source_intrinsics(int source_width, int source_height) {
+  const int crop_x = std::max(0, util::getenv("K230_CAM_CROP_X", 0));
+  const int crop_y = std::max(0, util::getenv("K230_CAM_CROP_Y", 0));
+  const int crop_width = std::max(2, util::getenv("K230_CAM_CROP_WIDTH", K230_DEFAULT_SENSOR_WIDTH));
+  const int crop_height = std::max(2, util::getenv("K230_CAM_CROP_HEIGHT", K230_DEFAULT_SENSOR_HEIGHT));
+
+  const float default_sensor_fx = K230_DEFAULT_SOURCE_FX * K230_DEFAULT_SENSOR_WIDTH / K230_DEFAULT_WIDTH;
+  const float default_sensor_fy = K230_DEFAULT_SOURCE_FY * K230_DEFAULT_SENSOR_HEIGHT / K230_DEFAULT_HEIGHT;
+  const float default_sensor_cx = K230_DEFAULT_SOURCE_CX * K230_DEFAULT_SENSOR_WIDTH / K230_DEFAULT_WIDTH;
+  const float default_sensor_cy = K230_DEFAULT_SOURCE_CY * K230_DEFAULT_SENSOR_HEIGHT / K230_DEFAULT_HEIGHT;
+
+  const float sensor_fx = getenv_optional_float("K230_SENSOR_FX", default_sensor_fx);
+  const float sensor_fy = getenv_optional_float("K230_SENSOR_FY", default_sensor_fy);
+  const float sensor_cx = getenv_optional_float("K230_SENSOR_CX", default_sensor_cx);
+  const float sensor_cy = getenv_optional_float("K230_SENSOR_CY", default_sensor_cy);
+
+  const float sx = static_cast<float>(source_width) / crop_width;
+  const float sy = static_cast<float>(source_height) / crop_height;
+  float preset_fx = sensor_fx * sx;
+  float preset_fy = sensor_fy * sy;
+  float preset_cx = (sensor_cx - crop_x) * sx;
+  float preset_cy = (sensor_cy - crop_y) * sy;
+
+  const std::string preset = util::getenv("K230_SOURCE_PRESET");
+  if (preset == "wide") {
+    preset_fx = 455.0f;
+    preset_fy = 455.0f;
+    preset_cx = 256.0f;
+    preset_cy = 104.0f;
+  } else if (preset == "cal") {
+    preset_fx = 606.7f;
+    preset_fy = 606.7f;
+    preset_cx = 256.0f;
+    preset_cy = 47.6f;
+  } else if (!preset.empty() && preset != "medmodel") {
+    LOGE("unknown K230_SOURCE_PRESET=%s", preset.c_str());
+  }
+
+  const float fx = getenv_optional_float("K230_SOURCE_FX", preset_fx);
+  const float fy = getenv_optional_float("K230_SOURCE_FY", preset_fy);
+  const float cx = getenv_optional_float("K230_SOURCE_CX", preset_cx);
+  const float cy = getenv_optional_float("K230_SOURCE_CY", preset_cy);
+
+  LOGW("K230 source intrinsics %.3f %.3f %.3f %.3f for %dx%d crop=%dx%d+%d+%d",
+       fx, fy, cx, cy, source_width, source_height, crop_width, crop_height, crop_x, crop_y);
+  return (mat3){{
+    fx, 0.0f, cx,
+    0.0f, fy, cy,
+    0.0f, 0.0f, 1.0f,
+  }};
+}
+
+float k230_transform_inbounds_ratio(const mat3 &projection, int source_width, int source_height) {
+  constexpr int model_width = 512;
+  constexpr int model_height = 256;
+  constexpr int step = 8;
+
+  int valid = 0;
+  int total = 0;
+  for (int y = 0; y < model_height; y += step) {
+    for (int x = 0; x < model_width; x += step) {
+      const float x0 = projection.v[0] * x + projection.v[1] * y + projection.v[2];
+      const float y0 = projection.v[3] * x + projection.v[4] * y + projection.v[5];
+      const float w0 = projection.v[6] * x + projection.v[7] * y + projection.v[8];
+      if (std::fabs(w0) > 1e-6f) {
+        const float sx = x0 / w0;
+        const float sy = y0 / w0;
+        if (std::isfinite(sx) && std::isfinite(sy) &&
+            sx >= -1.0f && sx < source_width &&
+            sy >= -1.0f && sy < source_height) {
+          ++valid;
+        }
+      }
+      ++total;
+    }
+  }
+  return total > 0 ? static_cast<float>(valid) / total : 0.0f;
+}
+
+}  // namespace
+#endif
+
+mat3 update_calibration(const Eigen::Matrix<float, 3, 4> &extrinsics, const mat3 &cam_intrinsics_mat, bool bigmodel_frame) {
   /*
      import numpy as np
      from common.transformations.model import medmodel_frame_from_road_frame
@@ -33,8 +141,8 @@ mat3 update_calibration(Eigen::Matrix<float, 3, 4> &extrinsics, bool wide_camera
     -2.19780220e-03,  4.11497335e-19,  5.62637363e-01,
     -5.46146580e-20,  1.80147721e-03, -2.73464241e-01).finished();
 
-  const auto cam_intrinsics = Eigen::Matrix<float, 3, 3, Eigen::RowMajor>(wide_camera ? ecam_intrinsic_matrix.v : fcam_intrinsic_matrix.v);
   static const mat3 yuv_transform = get_model_yuv_transform();
+  const auto cam_intrinsics = Eigen::Matrix<float, 3, 3, Eigen::RowMajor>(cam_intrinsics_mat.v);
 
   auto ground_from_model_frame = bigmodel_frame ? ground_from_sbigmodel_frame : ground_from_medmodel_frame;
   auto camera_frame_from_road_frame = cam_intrinsics * extrinsics;
@@ -55,8 +163,8 @@ static uint64_t get_ts(const VisionIpcBufExtra &extra) {
   return Hardware::TICI() ? extra.timestamp_sof : extra.timestamp_eof;
 }
 
-
-void run_model(ModelState &model, VisionIpcClient &vipc_client_main, VisionIpcClient &vipc_client_extra, bool main_wide_camera, bool use_extra_client) {
+void run_model(ModelState &model, VisionIpcClient &vipc_client_main, VisionIpcClient &vipc_client_extra,
+               bool main_wide_camera, bool use_extra_client, int main_width, int main_height) {
   // messaging
   PubMaster pm({"modelV2", "cameraOdometry"});
   SubMaster sm({"lateralPlan", "roadCameraState", "liveCalibration"});
@@ -71,6 +179,25 @@ void run_model(ModelState &model, VisionIpcClient &vipc_client_main, VisionIpcCl
   mat3 model_transform_main = {};
   mat3 model_transform_extra = {};
   bool live_calib_seen = false;
+
+#ifdef USE_K230_KMODEL
+  const mat3 main_cam_intrinsics = k230_source_intrinsics(main_width, main_height);
+  const mat3 extra_cam_intrinsics = main_cam_intrinsics;
+  const float min_warp_inbounds = util::getenv("K230_MIN_WARP_INBOUNDS", 0.85f);
+#else
+  (void)main_width;
+  (void)main_height;
+  const mat3 main_cam_intrinsics = main_wide_camera ? ecam_intrinsic_matrix : fcam_intrinsic_matrix;
+  const mat3 extra_cam_intrinsics = Hardware::TICI() ? ecam_intrinsic_matrix : fcam_intrinsic_matrix;
+#endif
+  const Eigen::Matrix<float, 3, 4> zero_extrinsics =
+#ifdef USE_K230_KMODEL
+      k230_zero_extrinsics();
+#else
+      Eigen::Matrix<float, 3, 4>::Zero();
+#endif
+  model_transform_main = update_calibration(zero_extrinsics, main_cam_intrinsics, false);
+  model_transform_extra = update_calibration(zero_extrinsics, extra_cam_intrinsics, true);
 
   VisionBuf *buf_main = nullptr;
   VisionBuf *buf_extra = nullptr;
@@ -123,8 +250,24 @@ void run_model(ModelState &model, VisionIpcClient &vipc_client_main, VisionIpcCl
         extrinsic_matrix_eigen(i / 4, i % 4) = extrinsic_matrix[i];
       }
 
-      model_transform_main = update_calibration(extrinsic_matrix_eigen, main_wide_camera, false);
-      model_transform_extra = update_calibration(extrinsic_matrix_eigen, Hardware::TICI(), true);
+      const mat3 candidate_transform_main = update_calibration(extrinsic_matrix_eigen, main_cam_intrinsics, false);
+      const mat3 candidate_transform_extra = update_calibration(extrinsic_matrix_eigen, extra_cam_intrinsics, true);
+#ifdef USE_K230_KMODEL
+      const float inbounds = k230_transform_inbounds_ratio(candidate_transform_main, main_width, main_height);
+      if (util::getenv("K230_LOG_WARP_BOUNDS", 0) != 0) {
+        LOGW("K230 main warp inbounds %.1f%% for source %dx%d", inbounds * 100.0f, main_width, main_height);
+      }
+      if (inbounds >= min_warp_inbounds) {
+        model_transform_main = candidate_transform_main;
+        model_transform_extra = candidate_transform_extra;
+      } else {
+        LOGE("rejecting K230 calibration warp inbounds %.1f%% below %.1f%%",
+             inbounds * 100.0f, min_warp_inbounds * 100.0f);
+      }
+#else
+      model_transform_main = candidate_transform_main;
+      model_transform_extra = candidate_transform_extra;
+#endif
       live_calib_seen = true;
     }
 
@@ -160,6 +303,7 @@ void run_model(ModelState &model, VisionIpcClient &vipc_client_main, VisionIpcCl
 }
 
 int main(int argc, char **argv) {
+#ifndef USE_K230_KMODEL
   if (!Hardware::PC()) {
     int ret;
     ret = util::set_realtime_priority(54);
@@ -167,13 +311,18 @@ int main(int argc, char **argv) {
     util::set_core_affinity({Hardware::EON() ? 2 : 7});
     assert(ret == 0);
   }
+#endif
 
   bool main_wide_camera = Hardware::TICI() ? Params().getBool("EnableWideCamera") : false;
   bool use_extra_client = Hardware::TICI() && !main_wide_camera;
 
   // cl init
-  cl_device_id device_id = cl_get_device_id(CL_DEVICE_TYPE_DEFAULT);
-  cl_context context = CL_CHECK_ERR(clCreateContext(NULL, 1, &device_id, NULL, NULL, &err));
+  cl_device_id device_id = nullptr;
+  cl_context context = nullptr;
+#ifndef USE_K230_KMODEL
+  device_id = cl_get_device_id(CL_DEVICE_TYPE_DEFAULT);
+  context = CL_CHECK_ERR(clCreateContext(NULL, 1, &device_id, NULL, NULL, &err));
+#endif
 
   // init the models
   ModelState model;
@@ -202,10 +351,13 @@ int main(int argc, char **argv) {
       LOGW("connected extra cam with buffer size: %d (%d x %d)", wb->len, wb->width, wb->height);
     }
 
-    run_model(model, vipc_client_main, vipc_client_extra, main_wide_camera, use_extra_client);
+    run_model(model, vipc_client_main, vipc_client_extra, main_wide_camera, use_extra_client,
+              b->width, b->height);
   }
 
   model_free(&model);
-  CL_CHECK(clReleaseContext(context));
+  if (context != nullptr) {
+    CL_CHECK(clReleaseContext(context));
+  }
   return 0;
 }

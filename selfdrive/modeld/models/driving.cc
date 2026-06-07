@@ -4,13 +4,14 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <eigen3/Eigen/Dense>
 
 #include "selfdrive/common/clutil.h"
 #include "selfdrive/common/params.h"
-#include "selfdrive/common/timing.h"
 
 constexpr float FCW_THRESHOLD_5MS2_HIGH = 0.15;
 constexpr float FCW_THRESHOLD_5MS2_LOW = 0.05;
@@ -32,6 +33,8 @@ void model_init(ModelState* s, cl_device_id device_id, cl_context context) {
 
 #ifdef USE_THNEED
   s->m = std::make_unique<ThneedModel>("models/supercombo.thneed",
+#elif USE_K230_KMODEL
+  s->m = std::make_unique<K230Model>("models/supercombo.kmodel",
 #elif USE_ONNX_MODEL
   s->m = std::make_unique<ONNXModel>("models/supercombo.onnx",
 #else
@@ -56,7 +59,7 @@ void model_init(ModelState* s, cl_device_id device_id, cl_context context) {
 
 ModelOutput* model_eval_frame(ModelState* s, VisionBuf* buf, VisionBuf* wbuf,
                               const mat3 &transform, const mat3 &transform_wide, float *desire_in) {
-#ifdef DESIRE
+  #ifdef DESIRE
   if (desire_in != NULL) {
     for (int i = 1; i < DESIRE_LEN; i++) {
       // Model decides when action is completed
@@ -73,13 +76,17 @@ ModelOutput* model_eval_frame(ModelState* s, VisionBuf* buf, VisionBuf* wbuf,
 
   // if getInputBuf is not NULL, net_input_buf will be
   auto input_buf = static_cast<cl_mem*>(s->m->getInputBuf());
-  auto net_input_buf = s->frame->prepare(buf->buf_cl, buf->width, buf->height, transform, input_buf);
+  auto net_input_buf = s->frame->prepare(buf, transform, input_buf);
   s->m->addImage(net_input_buf, s->frame->buf_size);
 
+  #ifdef USE_K230_KMODEL
+  s->m->addExtra(nullptr, s->wide_frame->buf_size);
+  #else
   if (wbuf != nullptr) {
-    auto net_extra_buf = s->wide_frame->prepare(wbuf->buf_cl, wbuf->width, wbuf->height, transform_wide, static_cast<cl_mem*>(s->m->getExtraBuf()));
+    auto net_extra_buf = s->wide_frame->prepare(wbuf, transform_wide, static_cast<cl_mem*>(s->m->getExtraBuf()));
     s->m->addExtra(net_extra_buf, s->wide_frame->buf_size);
   }
+  #endif
   if (input_buf != nullptr) {
     s->frame->finish();
     if (wbuf != nullptr) {

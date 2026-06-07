@@ -14,6 +14,10 @@ from common.params import Params
 from selfdrive.swaglog import cloudlog
 
 
+def skip_panda_flash() -> bool:
+  return os.getenv("K230_SKIP_PANDA_FLASH") == "1" or os.getenv("OPENPILOT_TARGET_ARCH") == "riscv64"
+
+
 def get_expected_signature(panda: Panda) -> bytes:
   fn = DEFAULT_H7_FW_FN if (panda.get_mcu_type() == MCU_TYPE_H7) else DEFAULT_FW_FN
 
@@ -34,6 +38,9 @@ def flash_panda(panda_serial: str) -> Panda:
   cloudlog.warning(f"Panda {panda_serial} connected, version: {panda_version}, signature {panda_signature.hex()[:16]}, expected {fw_signature.hex()[:16]}")
 
   if panda.bootstub or panda_signature != fw_signature:
+    if skip_panda_flash():
+      cloudlog.warning("Panda firmware differs, but K230_SKIP_PANDA_FLASH is set; using existing panda firmware")
+      return panda
     cloudlog.info("Panda firmware out of date, update required")
     panda.flash()
     cloudlog.info("Done flashing")
@@ -84,6 +91,9 @@ def main() -> NoReturn:
 
       # Flash all Pandas in DFU mode
       for p in PandaDFU.list():
+        if skip_panda_flash():
+          cloudlog.warning(f"Panda in DFU mode found, but K230_SKIP_PANDA_FLASH is set; skipping recovery {p}")
+          continue
         cloudlog.info(f"Panda in DFU mode found, flashing recovery {p}")
         PandaDFU(p).recover()
       time.sleep(1)

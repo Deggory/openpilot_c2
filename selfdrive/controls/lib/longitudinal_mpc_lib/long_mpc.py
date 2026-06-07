@@ -2,12 +2,27 @@
 import os
 import numpy as np
 
-from common.realtime import sec_since_boot
+if __name__ == '__main__':
+  from time import monotonic as sec_since_boot
+else:
+  from common.realtime import sec_since_boot
 from common.numpy_fast import clip, interp
-from selfdrive.swaglog import cloudlog
 from selfdrive.modeld.constants import index_function
-from selfdrive.controls.lib.radar_helpers import _LEAD_ACCEL_TAU
 from common.conversions import Conversions as CV
+
+if __name__ == '__main__':
+  _LEAD_ACCEL_TAU = 1.5
+  Params = None
+
+  class _NoopCloudLog:
+    def warning(self, *args, **kwargs):
+      pass
+
+  cloudlog = _NoopCloudLog()
+else:
+  from selfdrive.swaglog import cloudlog
+  from selfdrive.controls.lib.radar_helpers import _LEAD_ACCEL_TAU
+  from common.params import Params
 
 if __name__ == '__main__':  # generating code
   from pyextra.acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
@@ -16,7 +31,6 @@ else:
 
 from casadi import SX, vertcat
 
-from common.params import Params
 from decimal import Decimal
 
 MODEL_NAME = 'long'
